@@ -3,13 +3,256 @@
 #include <psp2/kernel/clib.h>
 #include <psp2/camera.h>
 #include <taihen.h>
+//#include "log.h"
 
-#define NB_CAM 2
+#ifdef ENABLE_BMP
+#include <psp2/io/fcntl.h>
+#include <psp2/appmgr.h>
+#include <psp2/kernel/sysmem.h>
+
+#include <kuio.h>
+#include <DSMotionLibrary.h>
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+
+// Bitmap reading inspired from:
+// https://github.com/xerpi/libvita2d/blob/master/libvita2d/source/vita2d_image_bmp.c
+#define BMP_SIGNATURE (0x4D42)
+
+typedef struct {
+	unsigned short	bfType;
+	unsigned int	bfSize;
+	unsigned short	bfReserved1;
+	unsigned short	bfReserved2;
+	unsigned int	bfOffBits;
+} __attribute__((packed)) BITMAPFILEHEADER;
+
+typedef struct {
+	unsigned int	biSize;
+	int		biWidth;
+	int		biHeight;
+	unsigned short	biPlanes;
+	unsigned short	biBitCount;
+	unsigned int	biCompression;
+	unsigned int	biSizeImage;
+	int		biXPelsPerMeter;
+	int		biYPelsPerMeter;
+	unsigned int	biClrUsed;
+	unsigned int	biClrImportant;
+} __attribute__((packed)) BITMAPINFOHEADER;
+
+unsigned int alignSizeForMemBlock(unsigned int size)
+{
+    if (size & 0xFFF) {
+        // Align to 4kB pages
+        size += ((~size) & 0xFFF) + 1;
+    }
+    return size;
+}
+
+typedef struct {
+    SceUID blockIDs[3];
+    void* blocksData[3];
+    uint16_t texelBits[3];
+    uint16_t rowStride[3];
+    uint16_t imageWidth;
+    uint16_t imageHeight;
+    int ready;
+} ImageBuffers;
+
+typedef void (*BufferWriteFunc)(ImageBuffers* oBuffers, unsigned int iTexelPos, unsigned int iColor);
+
+// Camera formats support
+
+static void ABGRWrite(ImageBuffers* oBuffers, unsigned int iTexelPos, unsigned int iColor)
+{
+    ((unsigned int*)oBuffers->blocksData[0])[iTexelPos] = iColor;
+}
+
+static void ARGBWrite(ImageBuffers* oBuffers, unsigned int iTexelPos, unsigned int iColor)
+{
+    ((unsigned int*)oBuffers->blocksData[0])[iTexelPos] = ((iColor>>24)&0xFF)<<8 | (iColor&0xFF)<<16 |
+                                                          ((iColor>>8)&0xFF)<<24 | ((iColor>>16)&0xFF);
+}
+
+// Bitmap reading functions
+
+static int LoadBMPGeneric(BITMAPFILEHEADER *bmp_fh, BITMAPINFOHEADER *bmp_ih, SceUID iFile,
+                          ImageBuffers* oBuffers, BufferWriteFunc iWriteFunc)
+{    
+    unsigned int row_stride = bmp_ih->biWidth * (bmp_ih->biBitCount/8);
+    if (row_stride%4 != 0) {
+        row_stride += 4-(row_stride%4);
+    }
+
+    unsigned int size = alignSizeForMemBlock(row_stride);
+    SceUID bufferID = sceKernelAllocMemBlock("bitmap_row", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, size, NULL);
+    void *buffer = NULL;
+    sceKernelGetMemBlockBase(bufferID, (void **)&buffer);
+    if (!buffer) {
+        return -1;
+    }
+
+    kuIoLseek(iFile, bmp_fh->bfOffBits, SEEK_SET);
+
+    int i, x, y;
+    for (i = 0; i < bmp_ih->biHeight; i++)
+    {
+        kuIoRead(iFile, buffer, row_stride);
+
+        y = bmp_ih->biHeight - 1 - i;
+        unsigned int texelPos = y*bmp_ih->biWidth;
+
+        for (x = 0; x < bmp_ih->biWidth; x++)
+        {
+            unsigned int imgColor = 0;
+            if (bmp_ih->biBitCount == 32) {		//BGRA8888
+                unsigned int color = *(unsigned int *)(buffer + x*4);
+                imgColor = ((color>>24)&0xFF)<<24 | (color&0xFF)<<16 |
+                    ((color>>8)&0xFF)<<8 | ((color>>16)&0xFF);
+
+            } else if (bmp_ih->biBitCount == 24) {	//BGR888
+                unsigned char *address = buffer + x*3;
+                imgColor = (*address)<<16 | (*(address+1))<<8 |
+                    (*(address+2)) | (0xFF<<24);
+
+            } else if (bmp_ih->biBitCount == 16) {	//BGR565
+                unsigned int color = *(unsigned short *)(buffer + x*2);
+                unsigned char r = (color       & 0x1F)  *((float)255/31);
+                unsigned char g = ((color>>5)  & 0x3F)  *((float)255/63);
+                unsigned char b = ((color>>11) & 0x1F)  *((float)255/31);
+                imgColor = ((r<<16) | (g<<8) | b | (0xFF<<24));
+            }
+
+            iWriteFunc(oBuffers, texelPos, imgColor);
+            texelPos++;
+        }
+    }
+
+    sceKernelFreeMemBlock(bufferID);
+    return 1;
+}
+
+static int LoadBMPFile(SceUID iFile, SceCameraFormat iFormat, char* iMemName, ImageBuffers* oBuffers)
+{
+    BITMAPFILEHEADER bmp_fh;
+    kuIoRead(iFile, (void *)&bmp_fh, sizeof(BITMAPFILEHEADER));
+    if (bmp_fh.bfType != BMP_SIGNATURE)
+        return -1;
+
+    BITMAPINFOHEADER bmp_ih;
+    kuIoRead(iFile, (void *)&bmp_ih, sizeof(BITMAPINFOHEADER));
+
+    BufferWriteFunc writeFunc = NULL;
+    
+    oBuffers->imageWidth = bmp_ih.biWidth;
+    oBuffers->imageHeight = bmp_ih.biHeight;
+    oBuffers->rowStride[0] = 0;
+    oBuffers->rowStride[1] = 0;
+    oBuffers->rowStride[2] = 0;
+    
+    switch (iFormat)
+    {
+    case SCE_CAMERA_FORMAT_ARGB:
+        oBuffers->texelBits[0] = 32;
+        oBuffers->rowStride[0] = 4*bmp_ih.biWidth;
+        writeFunc = &ARGBWrite;
+        break;
+    case SCE_CAMERA_FORMAT_ABGR:
+        oBuffers->texelBits[0] = 32;
+        oBuffers->rowStride[0] = 4*bmp_ih.biWidth;
+        writeFunc = &ABGRWrite;
+        break;
+    case SCE_CAMERA_FORMAT_YUV422_PLANE:
+    case SCE_CAMERA_FORMAT_YUV420_PLANE:
+    case SCE_CAMERA_FORMAT_YUV422_PACKED:
+    case SCE_CAMERA_FORMAT_RAW8:
+    case SCE_CAMERA_FORMAT_INVALID:
+        return -1;
+    }
+    
+    if (NULL == writeFunc)
+        return -1;
+    
+    char memname[48];
+    for (int i = 0; i < 3; i++)
+    {
+        if (oBuffers->rowStride[i] > 0)
+        {
+            sprintf(memname, "%s_%d", iMemName, i);
+            unsigned int size = alignSizeForMemBlock(oBuffers->rowStride[i]*bmp_ih.biHeight);
+            oBuffers->blockIDs[i] = sceKernelAllocMemBlock(memname, SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, size, NULL);
+            oBuffers->blocksData[i] = NULL;
+            sceKernelGetMemBlockBase(oBuffers->blockIDs[i], (void **)&oBuffers->blocksData[i]);
+            if (!oBuffers->blocksData[i])
+            {
+                sceKernelFreeMemBlock(oBuffers->blockIDs[i]);
+                oBuffers->blockIDs[i] = -1;
+                return -1;
+            }
+        }
+    }
+
+    return LoadBMPGeneric(&bmp_fh, &bmp_ih, iFile, oBuffers, writeFunc);
+}
+
+// Math functions (used by motion detection)
+
+#define abs(val) ((val < 0) ? -val : val)
+#define sign(val) ((val > 0) ? 1 : ((val < 0) ? -1 : 0))
+#define clamp(val, min, max) ((val > max) ? max : ((val < min) ? min : val))
+
+#define M_PI 3.14159265359f
+
+float atan2_approx(float y, float x)
+{
+    static float ONEQTR_PI = M_PI / 4.0;
+	static float THRQTR_PI = 3.0 * M_PI / 4.0;
+	float r, angle;
+	float abs_y = abs(y) + 1e-10f;
+	if ( x < 0.0f )
+	{
+		r = (x + abs_y) / (abs_y - x);
+		angle = THRQTR_PI;
+	}
+	else
+	{
+		r = (x - abs_y) / (x + abs_y);
+		angle = ONEQTR_PI;
+	}
+	angle += (0.1963f * r * r - 0.9817f) * r;
+	if ( y < 0.0f )
+		return -angle;
+
+    return angle;
+}
+
+static char titleid[16] = {'\0'};
+
+#endif
 
 static SceUID g_hooks[39];
 
 
 // Open - Close
+
+#define NB_CAM 2
+
+#ifdef ENABLE_BMP
+static uint16_t width[NB_CAM] = {0, 0};
+static uint16_t height[NB_CAM] = {0, 0};
+static SceCameraFormat format[NB_CAM] = {0, 0};
+
+static void* IBufferOnOpen[NB_CAM] = {NULL, NULL};
+static void* UBufferOnOpen[NB_CAM] = {NULL, NULL};
+static void* VBufferOnOpen[NB_CAM] = {NULL, NULL};
+
+static ImageBuffers imageBuffers[NB_CAM] = { { {-1, -1, -1}, {NULL, NULL, NULL}, {0, 0, 0}, {0, 0, 0}, 0, 0, -1} ,
+                                             { {-1, -1, -1}, {NULL, NULL, NULL}, {0, 0, 0}, {0, 0, 0}, 0, 0, -1} };
+static SceCameraFormat imageFormat[NB_CAM] = {0, 0};
+#endif
 
 static int cameraOpened[NB_CAM] = {0, 0};
 static uint16_t framerate[NB_CAM];
@@ -19,15 +262,97 @@ static int hook_sceCameraOpen(int devnum, SceCameraInfo *pInfo)
 {
     int res = TAI_CONTINUE(int, ref_hook0, devnum, pInfo);
     
-    if ((unsigned int)devnum < NB_CAM && NULL != pInfo)
+    if ((unsigned int)devnum < NB_CAM && NULL != pInfo && !cameraOpened[devnum])
     {
         cameraOpened[devnum] = 1;
         framerate[devnum] = pInfo->framerate;
 
-        if (res < 0)
+        if (res < 0 && pInfo->resolution > SCE_CAMERA_RESOLUTION_0_0 && pInfo->resolution <= SCE_CAMERA_RESOLUTION_640_360)
         {
-            pInfo->width = (640 >> (pInfo->resolution-1));
-            pInfo->height = (480 >> (pInfo->resolution-1));
+            if (pInfo->resolution < SCE_CAMERA_RESOLUTION_352_288)
+            {
+                pInfo->width = (640 >> (pInfo->resolution-1));
+                pInfo->height = (480 >> (pInfo->resolution-1));
+            }
+            else if (pInfo->resolution < SCE_CAMERA_RESOLUTION_480_272)
+            {
+                pInfo->width = (352 >> (pInfo->resolution-4));
+                pInfo->height = (288 >> (pInfo->resolution-4));
+            }
+            else if (SCE_CAMERA_RESOLUTION_480_272 == pInfo->resolution)
+            {
+                pInfo->width = 480;
+                pInfo->height = 272;
+            }
+            else if (SCE_CAMERA_RESOLUTION_640_360 == pInfo->resolution)
+            {
+                pInfo->width = 640;
+                pInfo->height = 360;
+            }
+        
+        #ifdef ENABLE_BMP
+            width[devnum] = pInfo->width;
+            height[devnum] = pInfo->height;
+            if (0 == pInfo->buffer)
+            {
+                IBufferOnOpen[devnum] = pInfo->pIBase;
+                UBufferOnOpen[devnum] = pInfo->pUBase;
+                VBufferOnOpen[devnum] = pInfo->pVBase;
+            }
+            format[devnum] = pInfo->format;
+
+            ImageBuffers* imageBuf = &imageBuffers[devnum];
+            if (imageBuf->ready < 0 || imageFormat[devnum] != pInfo->format)
+            {
+                imageBuf->ready = 0;
+                for (int i = 0; i < 3; i++)
+                {
+                    if (imageBuf->blockIDs[i] >= 0 )
+                    {
+                        sceKernelFreeMemBlock(imageBuf->blockIDs[i]);
+                        imageBuf->blockIDs[i] = -1;
+                    }
+                }
+                
+                char memname[32];
+                char pathname[256];
+                SceUID fd = -1;
+                char* camname = (1 == devnum)?"Back":"Front";
+                sprintf(memname, "%s_%s", titleid, camname);
+                sprintf(pathname, "ux0:/data/FakeCamera/%s_%s.bmp", titleid, memname);
+                kuIoOpen(pathname, SCE_O_RDONLY, &fd);
+                if (fd < 0)
+                {
+                    sprintf(pathname, "ux0:/data/FakeCamera/%s.bmp", titleid);
+                    kuIoOpen(pathname, SCE_O_RDONLY, &fd);
+                }
+                if (fd < 0)
+                {
+                    sprintf(pathname, "ux0:/data/FakeCamera/ALL_%s.bmp", camname);
+                    kuIoOpen(pathname, SCE_O_RDONLY, &fd);
+                }
+                if (fd < 0)
+                {
+                    sprintf(pathname, "ux0:/data/FakeCamera/ALL.bmp");
+                    kuIoOpen(pathname, SCE_O_RDONLY, &fd);
+                }
+                if (fd >= 0)
+                {
+                    if (LoadBMPFile(fd, pInfo->format, memname, imageBuf) >= 0)
+                    {
+                        imageFormat[devnum] = pInfo->format;
+                        imageBuf->ready = 1;
+                    }
+                    else
+                    {
+                        imageFormat[devnum] = SCE_CAMERA_FORMAT_INVALID;
+                        imageBuf->ready = -1;
+                    }
+                    kuIoClose(fd);
+                }
+            }
+        #endif
+
             res = 0;
         }
     }
@@ -43,6 +368,16 @@ static int hook_sceCameraClose(int devnum)
     if ((unsigned int)devnum < NB_CAM)
     {
         cameraOpened[devnum] = 0;
+
+    #ifdef ENABLE_BMP
+        width[devnum] = 0;
+        height[devnum] = 0;
+        format[devnum] = 0;
+        IBufferOnOpen[devnum] = NULL;
+        UBufferOnOpen[devnum] = NULL;
+        VBufferOnOpen[devnum] = NULL;
+    #endif
+
         if (res < 0) res = 0;
     }
     
@@ -99,8 +434,92 @@ static int hook_sceCameraRead(int devnum, SceCameraRead *pRead)
         uint64_t fakeFrame = (((fakeTimeStamp-initTimeStamp[devnum])*framerate[devnum])>>22) + 1;
         if (res < 0)
         {
+        #ifdef ENABLE_BMP
+            ImageBuffers* imageBuf = &imageBuffers[devnum];
+            if (imageBuf->ready > 0 && width[devnum] > 0 && height[devnum] > 0)
+            {
+                float widthOffsetRate = 0.f;
+                float heightOffsetRate = 0.f;
+
+                signed short accel[3];
+                signed short gyro[3];
+                if (dsGetSampledAccelGyro(100, accel, gyro) >= 0)
+                {
+                    SceFVector3 accelVec = {-(float)accel[2] / 0x2000, (float)accel[0] / 0x2000, -(float)accel[1] / 0x2000};
+                    
+                    float pitch = atan2_approx(accelVec.z, -accelVec.y);
+                    float roll = atan2_approx(-accelVec.x, -accelVec.z*sign(-pitch));
+
+                    widthOffsetRate = clamp(-roll, -1.f, 1.f);
+                    heightOffsetRate = clamp(-(pitch+M_PI/2.f), -1.f, 1.f);
+                }
+                
+                unsigned int imgRowTexels = imageBuf->imageWidth;
+                unsigned int imgRowCount = imageBuf->imageHeight;
+                unsigned int bufRowTexels = width[devnum];
+                unsigned int bufRowCount = height[devnum];
+
+                unsigned int minRowTexels = (imgRowTexels < bufRowTexels) ? imgRowTexels : bufRowTexels;
+                unsigned int minRowCount = (imgRowCount < bufRowCount) ? imgRowCount : bufRowCount;
+
+                int widthLeft = imgRowTexels - bufRowTexels;
+                int heightLeft = imgRowCount - bufRowCount;
+
+                unsigned int widthOffset = (unsigned int)((1.f + widthOffsetRate) * (float)abs(widthLeft) / 2.f);
+                unsigned int heightOffset = (unsigned int)((1.f + heightOffsetRate) * (float)abs(heightLeft) / 2.f);
+
+                unsigned int bufWidthOffset = 0;
+                unsigned int imgWidthOffset = 0;
+                if (widthLeft > 0)
+                    imgWidthOffset = widthOffset;
+                else
+                    bufWidthOffset = widthOffset;
+
+                unsigned int bufHeightOffset = 0;
+                unsigned int imgHeightOffset = 0;
+                if (heightLeft > 0)
+                    imgHeightOffset = heightOffset;
+                else
+                    bufHeightOffset = heightOffset;
+
+                unsigned int bufOffset = bufWidthOffset + bufHeightOffset*bufRowTexels;
+                unsigned int imgOffset = imgWidthOffset + imgHeightOffset*imgRowTexels;
+
+                char* buffers[3] = {(NULL != IBufferOnOpen[devnum]) ? IBufferOnOpen[devnum] : pRead->pIBase,
+                                    (NULL != UBufferOnOpen[devnum]) ? UBufferOnOpen[devnum] : pRead->pUBase,
+                                    (NULL != VBufferOnOpen[devnum]) ? VBufferOnOpen[devnum] : pRead->pVBase};
+                for (int i = 0; i < 3; i++)
+                {
+                    char* image = (imageBuf->blockIDs[i] >= 0) ? imageBuf->blocksData[i] : NULL;
+                    if (NULL != buffers[i] && NULL != image)
+                    {
+                        unsigned int texelBytes = imageBuf->texelBits[i] / 8;
+
+                        for (int row = 0; row < bufHeightOffset; row++)
+                            memset(buffers[i]+row*bufRowTexels*texelBytes, 0, bufRowTexels*texelBytes);
+
+                        for (int row = 0 ; row < minRowCount ; row++)
+                            memcpy(buffers[i]+(row*bufRowTexels+bufOffset)*texelBytes, image+(row*imgRowTexels+imgOffset)*texelBytes, minRowTexels*texelBytes);
+                        
+                        if (imgRowTexels < bufRowTexels)
+                        {
+                            for (int row = bufHeightOffset ; row < bufHeightOffset+minRowCount ; row++)
+                            {
+                                memset(buffers[i]+row*bufRowTexels*texelBytes, 0, bufWidthOffset*texelBytes);
+                                memset(buffers[i]+(row*bufRowTexels+bufWidthOffset+imgRowTexels)*texelBytes, 0, (bufRowTexels-bufWidthOffset-imgRowTexels)*texelBytes);
+                            }
+                        }
+
+                        for (int row = bufHeightOffset+minRowCount; row < bufRowCount; row++)
+                            memset(buffers[i]+row*bufRowTexels*texelBytes, 0, bufRowTexels*texelBytes);
+                    }
+                }
+            }
+        #endif
+            
             pRead->frame = fakeFrame;
             pRead->timestamp = fakeTimeStamp;
+            pRead->status = 0;
             res = 0;
         }
         prevTimeStamp[devnum] = newTimeStamp;
@@ -581,6 +1000,16 @@ static int hook_sceCameraSetAutoControlHold(int devnum, int mode)
 void _start() __attribute__ ((weak, alias ("module_start")));
 int module_start(SceSize argc, const void *args)
 {
+    //log_reset();
+    //LOG("Starting module\n");
+    
+#ifdef ENABLE_BMP
+    sceAppMgrAppParamGetString(0, 12, titleid , 16);
+    //LOG("App ID %s\n", titleid);
+#endif
+
+    //log_flush();
+
     g_hooks[0] = taiHookFunctionImport(&ref_hook0, 
                                         TAI_MAIN_MODULE,
                                         0xDA91B3ED, // SceCamera
@@ -823,6 +1252,6 @@ int module_stop(SceSize argc, const void *args)
     if (g_hooks[36] >= 0) taiHookRelease(g_hooks[36], ref_hook36);
     if (g_hooks[37] >= 0) taiHookRelease(g_hooks[37], ref_hook37);
     if (g_hooks[38] >= 0) taiHookRelease(g_hooks[38], ref_hook38);
- 
+
     return SCE_KERNEL_STOP_SUCCESS;
 }
