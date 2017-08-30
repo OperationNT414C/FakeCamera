@@ -14,30 +14,5 @@ include("${VITASDK}/share/vita.cmake" REQUIRED)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -Wall -O3 -std=gnu99")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -fno-rtti -fno-exceptions")
 
-include_directories(
-)
-
-link_directories(
-  ${CMAKE_CURRENT_BINARY_DIR}
-)
-
-add_executable(fakecamera
-  main.c
-)
-
-target_link_libraries(fakecamera
-  taihen_stub
-  SceLibKernel_stub
-  k
-  gcc
-  SceKernelModulemgr_stub
-)
-
-set_target_properties(fakecamera
-  PROPERTIES LINK_FLAGS "-nostdlib"
-)
-
-vita_create_self(fakecamera.suprx fakecamera
-  UNSAFE
-  CONFIG ${CMAKE_SOURCE_DIR}/export.yml
-)
+add_subdirectory(FakeCamera)
+add_subdirectory(FakeCameraBMP)
