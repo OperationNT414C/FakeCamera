@@ -22,6 +22,7 @@ The plugin "fakecamera.suprx" doesn't have any dependency.
 The plugin "fakecamerabmp.suprx" depends on 2 kernel plugins:
  * **kuio.skprx** (https://github.com/Rinnegatamante/kuio) for "ux0:data" access even with signed titles
  * **dsmotion.skprx** (https://github.com/OperationNT414C/DSMotion) for image scrolling with motion controls
+ 
 Those dependencies must be loaded otherwise "fakecamerabmp.suprx" won't load.
 
 
