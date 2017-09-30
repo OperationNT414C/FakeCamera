@@ -19,11 +19,10 @@ With "fakecamerabmp.suprx" plugin, a BMP file image can be loaded and used as ca
 
 The plugin "fakecamera.suprx" doesn't have any dependency.
 
-The plugin "fakecamerabmp.suprx" depends on 2 kernel plugins:
- * **kuio.skprx** (https://github.com/Rinnegatamante/kuio) for "ux0:data" access even with signed titles
+The plugin "fakecamerabmp.suprx" depends an additional kernel plugin:
  * **dsmotion.skprx** (https://github.com/OperationNT414C/DSMotion) for image scrolling with motion controls
  
-Those dependencies must be loaded otherwise "fakecamerabmp.suprx" won't load.
+This dependency must be loaded otherwise "fakecamerabmp.suprx" won't load.
 
 
 ### Installation
@@ -40,7 +39,6 @@ OR (even if the title doesn't crash, it will allow you to set up a BMP image as 
 ```
 *KERNEL
 ux0:tai/dsmotion.skprx
-ux0:tai/kuio.skprx
 
 *TITLEID00
 ux0:tai/fakecamerabmp.suprx
@@ -54,17 +52,18 @@ DO NOT use both "fakecamera.suprx" and "fakecamerabmp.suprx" on the same configu
 ### Compatibility
 
  * PCSF00007 - WipEout 2048 - The game won't crash on a multiplayer session start! (due to the useless picture feature)
- * PCSF00214 - Tearaway - It won't crash but it will be locked on some asked interactions (like shaking the PS Vita)
+ * PCSF00214 - Tearaway - It won't crash but it will be locked on some asked interactions, like shaking the PS Vita (use DSMotion to by-pass the problem)
 
 
 ### BMP load compatibility
 
 The plugin version which allow a BMP image as camera output works on very limited applications list:
  * PCM300001 - Pro Camera Vita - Works fine
- * NPXS10007 - Welcome Park - Works fine in "Hello Face" mini-game but doesn't work in "Snap + Slide" mini-game
+ * NPXS10007 - Welcome Park - Works fine in "Hello Face" and "Snap + Slide" mini-games
+ * VITASHELL - Vita Shell - Works fine in QR scan feature
 
 
 ### Credits
 
- * **Rinnegatamante** for his "kuio" kernel plugin
+ * **Rinnegatamante** for "AntiBlackList" and his help about file access permission
  * **xerpi** for his "libvita2d" source code which inspired me for BMP format read
