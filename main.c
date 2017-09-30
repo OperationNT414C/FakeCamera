@@ -10,12 +10,31 @@
 #include <psp2/appmgr.h>
 #include <psp2/kernel/sysmem.h>
 
-#include <kuio.h>
 #include <DSMotionLibrary.h>
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+
+// Structure to simulate SceCamera API alternative behavior
+typedef struct SceCameraRead2 {
+	SceSize size; //!< sizeof(SceCameraRead2)
+	int mode;
+	int pad;
+	int status;
+	uint64_t frame;
+	uint64_t timestamp;
+    int unknown0;
+    int unknown1;
+    int unknown2;
+    void* unknownNullCheck;
+	SceSize sizeIBase;
+	SceSize sizeUBase;
+	SceSize sizeVBase;
+	void *pIBase;
+	void *pUBase;
+	void *pVBase;
+} SceCameraRead2;
 
 // Bitmap reading inspired from:
 // https://github.com/xerpi/libvita2d/blob/master/libvita2d/source/vita2d_image_bmp.c
@@ -73,8 +92,7 @@ static void ABGRWrite(ImageBuffers* oBuffers, unsigned int iTexelPos, unsigned i
 
 static void ARGBWrite(ImageBuffers* oBuffers, unsigned int iTexelPos, unsigned int iColor)
 {
-    ((unsigned int*)oBuffers->blocksData[0])[iTexelPos] = ((iColor>>24)&0xFF)<<8 | (iColor&0xFF)<<16 |
-                                                          ((iColor>>8)&0xFF)<<24 | ((iColor>>16)&0xFF);
+    ((unsigned int*)oBuffers->blocksData[0])[iTexelPos] = (iColor&0xFF00FF00) | (iColor&0xFF)<<16 | (iColor&0xFF0000)>>16;
 }
 
 // Bitmap reading functions
@@ -95,12 +113,12 @@ static int LoadBMPGeneric(BITMAPFILEHEADER *bmp_fh, BITMAPINFOHEADER *bmp_ih, Sc
         return -1;
     }
 
-    kuIoLseek(iFile, bmp_fh->bfOffBits, SEEK_SET);
+    sceIoLseek(iFile, bmp_fh->bfOffBits, SCE_SEEK_SET);
 
     int i, x, y;
     for (i = 0; i < bmp_ih->biHeight; i++)
     {
-        kuIoRead(iFile, buffer, row_stride);
+        sceIoRead(iFile, buffer, row_stride);
 
         y = bmp_ih->biHeight - 1 - i;
         unsigned int texelPos = y*bmp_ih->biWidth;
@@ -138,12 +156,12 @@ static int LoadBMPGeneric(BITMAPFILEHEADER *bmp_fh, BITMAPINFOHEADER *bmp_ih, Sc
 static int LoadBMPFile(SceUID iFile, SceCameraFormat iFormat, char* iMemName, ImageBuffers* oBuffers)
 {
     BITMAPFILEHEADER bmp_fh;
-    kuIoRead(iFile, (void *)&bmp_fh, sizeof(BITMAPFILEHEADER));
+    sceIoRead(iFile, (void *)&bmp_fh, sizeof(BITMAPFILEHEADER));
     if (bmp_fh.bfType != BMP_SIGNATURE)
         return -1;
 
     BITMAPINFOHEADER bmp_ih;
-    kuIoRead(iFile, (void *)&bmp_ih, sizeof(BITMAPINFOHEADER));
+    sceIoRead(iFile, (void *)&bmp_ih, sizeof(BITMAPINFOHEADER));
 
     BufferWriteFunc writeFunc = NULL;
     
@@ -233,8 +251,8 @@ static char titleid[16] = {'\0'};
 
 #endif
 
-static SceUID g_hooks[39];
 
+static SceUID g_hooks[39];
 
 // Open - Close
 
@@ -300,6 +318,10 @@ static int hook_sceCameraOpen(int devnum, SceCameraInfo *pInfo)
                 VBufferOnOpen[devnum] = pInfo->pVBase;
             }
             format[devnum] = pInfo->format;
+            
+            //LOG("Camera opened %d with format %d\n", devnum, pInfo->format);
+            //LOG("Buffers pointers %x, %x, %x\n", (unsigned int)pInfo->pIBase, (unsigned int)pInfo->pUBase, (unsigned int)pInfo->pVBase);
+            //log_flush();
 
             ImageBuffers* imageBuf = &imageBuffers[devnum];
             if (imageBuf->ready < 0 || imageFormat[devnum] != pInfo->format)
@@ -316,39 +338,42 @@ static int hook_sceCameraOpen(int devnum, SceCameraInfo *pInfo)
                 
                 char memname[32];
                 char pathname[256];
-                SceUID fd = -1;
                 char* camname = (1 == devnum)?"Back":"Front";
                 sprintf(memname, "%s_%s", titleid, camname);
                 sprintf(pathname, "ux0:/data/FakeCamera/%s_%s.bmp", titleid, memname);
-                kuIoOpen(pathname, SCE_O_RDONLY, &fd);
+                SceUID fd = sceIoOpen(pathname, SCE_O_RDONLY, 0666);
                 if (fd < 0)
                 {
                     sprintf(pathname, "ux0:/data/FakeCamera/%s.bmp", titleid);
-                    kuIoOpen(pathname, SCE_O_RDONLY, &fd);
+                    fd = sceIoOpen(pathname, SCE_O_RDONLY, 0666);
                 }
                 if (fd < 0)
                 {
                     sprintf(pathname, "ux0:/data/FakeCamera/ALL_%s.bmp", camname);
-                    kuIoOpen(pathname, SCE_O_RDONLY, &fd);
+                    fd = sceIoOpen(pathname, SCE_O_RDONLY, 0666);
                 }
                 if (fd < 0)
                 {
                     sprintf(pathname, "ux0:/data/FakeCamera/ALL.bmp");
-                    kuIoOpen(pathname, SCE_O_RDONLY, &fd);
+                    fd = sceIoOpen(pathname, SCE_O_RDONLY, 0666);
                 }
                 if (fd >= 0)
                 {
+                    //LOG("Try to load file %s\n", pathname);
                     if (LoadBMPFile(fd, pInfo->format, memname, imageBuf) >= 0)
                     {
                         imageFormat[devnum] = pInfo->format;
                         imageBuf->ready = 1;
+                        //LOG(" => Success\n");
                     }
                     else
                     {
                         imageFormat[devnum] = SCE_CAMERA_FORMAT_INVALID;
                         imageBuf->ready = -1;
+                        //LOG(" => Failed\n");
                     }
-                    kuIoClose(fd);
+                    //log_flush();
+                    sceIoClose(fd);
                 }
             }
         #endif
@@ -485,9 +510,20 @@ static int hook_sceCameraRead(int devnum, SceCameraRead *pRead)
                 unsigned int bufOffset = bufWidthOffset + bufHeightOffset*bufRowTexels;
                 unsigned int imgOffset = imgWidthOffset + imgHeightOffset*imgRowTexels;
 
-                char* buffers[3] = {(NULL != IBufferOnOpen[devnum]) ? IBufferOnOpen[devnum] : pRead->pIBase,
-                                    (NULL != UBufferOnOpen[devnum]) ? UBufferOnOpen[devnum] : pRead->pUBase,
-                                    (NULL != VBufferOnOpen[devnum]) ? VBufferOnOpen[devnum] : pRead->pVBase};
+                char* buffers[3] = {NULL, NULL, NULL};
+                if (NULL == ((SceCameraRead2*)pRead)->unknownNullCheck && sizeof(SceCameraRead2) == pRead->size)
+                {
+                    SceCameraRead2* pRead2 = (SceCameraRead2*)pRead;
+                    buffers[0] = (NULL != IBufferOnOpen[devnum]) ? IBufferOnOpen[devnum] : pRead2->pIBase;
+                    buffers[1] = (NULL != UBufferOnOpen[devnum]) ? UBufferOnOpen[devnum] : pRead2->pUBase;
+                    buffers[2] = (NULL != VBufferOnOpen[devnum]) ? VBufferOnOpen[devnum] : pRead2->pVBase;
+                }
+                else
+                {
+                    buffers[0] = (NULL != IBufferOnOpen[devnum]) ? IBufferOnOpen[devnum] : pRead->pIBase;
+                    buffers[1] = (NULL != UBufferOnOpen[devnum]) ? UBufferOnOpen[devnum] : pRead->pUBase;
+                    buffers[2] = (NULL != VBufferOnOpen[devnum]) ? VBufferOnOpen[devnum] : pRead->pVBase;
+                }
                 for (int i = 0; i < 3; i++)
                 {
                     char* image = (imageBuf->blockIDs[i] >= 0) ? imageBuf->blocksData[i] : NULL;
@@ -1207,7 +1243,6 @@ int module_start(SceSize argc, const void *args)
                                         0xDA91B3ED, // SceCamera
                                         0x3A0DABBD, // sceCameraSetAutoControlHold
                                         hook_sceCameraSetAutoControlHold);
-
     return SCE_KERNEL_START_SUCCESS;
 }
 
