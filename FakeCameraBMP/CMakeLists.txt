@@ -5,18 +5,20 @@ add_definitions(
 )
 
 include_directories(
-  ${CMAKE_SOURCE_DIR}/kuio/include
+  ${CMAKE_SOURCE_DIR}
+  #${CMAKE_SOURCE_DIR}/kuio/include
   ${CMAKE_SOURCE_DIR}/DSMotion
 )
 
 link_directories(
   ${CMAKE_SOURCE_DIR}
-  ${CMAKE_SOURCE_DIR}/kuio/lib
+  #${CMAKE_SOURCE_DIR}/kuio/lib
   ${CMAKE_SOURCE_DIR}/DSMotion
 )
 
 add_executable(fakecamerabmp
   ${CMAKE_SOURCE_DIR}/main.c
+  #${CMAKE_SOURCE_DIR}/log.c
 )
 
 target_link_libraries(fakecamerabmp
@@ -27,7 +29,8 @@ target_link_libraries(fakecamerabmp
   SceKernelModulemgr_stub
   SceAppMgr_stub
   SceSysmem_stub
-  kuio_stub
+  SceIofilemgr_stub
+  #kuio_stub
   dsmotion_stub
 )
 
