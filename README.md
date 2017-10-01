@@ -52,15 +52,20 @@ DO NOT use both "fakecamera.suprx" and "fakecamerabmp.suprx" on the same configu
 ### Compatibility
 
  * PCSF00007 - WipEout 2048 - The game won't crash on a multiplayer session start! (due to the useless picture feature)
- * PCSF00214 - Tearaway - It won't crash but it will be locked on some asked interactions, like shaking the PS Vita (use DSMotion to by-pass the problem)
+ * PCSF00214 - Tearaway - It won't crash but it will be locked on some asked interactions, like shaking the PS Vita (use DSMotion to by-pass this problem)
 
 
 ### BMP load compatibility
 
-The plugin version which allow a BMP image as camera output works on very limited applications list:
  * PCM300001 - Pro Camera Vita - Works fine
- * NPXS10007 - Welcome Park - Works fine in "Hello Face" and "Snap + Slide" mini-games
  * VITASHELL - Vita Shell - Works fine in QR scan feature
+ * NPXS10007 - Welcome Park - Works fine in "Hello Face" and "Snap + Slide" (ARGB format test case) mini-games
+ * PCSB00031 - Virtua Tennis 4 - Works fine "CAM VT" mode (packed YUV422 format test case)
+ * PCSF00214 - Tearaway - Works fine
+ * PCSF00007 - WipEout 2048 - Works fine with low resolution images (tested with 64x64)
+
+Some camera formats have not been implemented/tested yet (because I didn't find a title to check them).
+So please report if you find a title where this feature doesn't work (just check with a low resolution BMP image before reporting).
 
 
 ### Credits
