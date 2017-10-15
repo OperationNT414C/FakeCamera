@@ -26,7 +26,8 @@ target_link_libraries(fakecamerabmp
   SceLibKernel_stub
   k
   gcc
-  SceKernelModulemgr_stub
+  SceKernelModuleMgr_stub
+  SceKernelThreadMgr_stub
   SceAppMgr_stub
   SceSysmem_stub
   SceIofilemgr_stub
