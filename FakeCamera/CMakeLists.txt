@@ -16,7 +16,8 @@ target_link_libraries(fakecamera
   SceLibKernel_stub
   k
   gcc
-  SceKernelModulemgr_stub
+  SceKernelModuleMgr_stub
+  SceKernelThreadMgr_stub
 )
 
 set_target_properties(fakecamera
