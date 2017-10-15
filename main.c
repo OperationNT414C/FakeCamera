@@ -1,5 +1,6 @@
 #include <psp2/kernel/modulemgr.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/clib.h>
 #include <psp2/camera.h>
 #include <taihen.h>
@@ -543,6 +544,8 @@ static int hook_sceCameraRead(int devnum, SceCameraRead *pRead)
     
     if ((unsigned int)devnum < NB_CAM && NULL != pRead && cameraActive[devnum])
     {
+        sceKernelDelayThread(1); // Release current thread time quantum to avoid freeze in some games (Frobisher Says)
+        
         uint64_t newTimeStamp = sceKernelGetProcessTimeWide();
         uint64_t fakeTimeStamp = (newTimeStamp+prevTimeStamp[devnum])>>1;
         uint64_t fakeFrame = (((fakeTimeStamp-initTimeStamp[devnum])*framerate[devnum])>>22) + 1;
