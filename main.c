@@ -77,22 +77,24 @@ typedef struct {
     void* blocksData[3];
     uint16_t texelBits[3];
     uint16_t rowStride[3];
-    uint16_t rowAlign;
+    uint16_t rowDepend[3];
+    uint16_t widthAlign;
+    uint16_t heightAlign;
     uint16_t imageWidth;
     uint16_t imageHeight;
     int ready;
 } ImageBuffers;
 
-typedef void (*BufferWriteFunc)(void* iFuncData, ImageBuffers* oBuffers, unsigned int iGlobalPos, uint16_t iRowPos, unsigned int iColor);
+typedef void (*BufferWriteFunc)(void* iFuncData, ImageBuffers* oBuffers, unsigned int iGlobalPos, uint16_t iWidthPos, uint16_t iHeightPos, unsigned int iColor);
 
 // Camera formats support
 
-static void ABGRWrite(void* iFuncData, ImageBuffers* oBuffers, unsigned int iGlobalPos, uint16_t iRowPos, unsigned int iColor)
+static void ABGRWrite(void* iFuncData, ImageBuffers* oBuffers, unsigned int iGlobalPos, uint16_t iWidthPos, uint16_t iHeightPos, unsigned int iColor)
 {
     ((unsigned int*)oBuffers->blocksData[0])[iGlobalPos] = iColor;
 }
 
-static void ARGBWrite(void* iFuncData, ImageBuffers* oBuffers, unsigned int iGlobalPos, uint16_t iRowPos, unsigned int iColor)
+static void ARGBWrite(void* iFuncData, ImageBuffers* oBuffers, unsigned int iGlobalPos, uint16_t iWidthPos, uint16_t iHeightPos, unsigned int iColor)
 {
     ((unsigned int*)oBuffers->blocksData[0])[iGlobalPos] = (iColor&0xFF00FF00) | (iColor&0xFF)<<16 | (iColor&0xFF0000)>>16;
 }
@@ -119,10 +121,10 @@ static void RGBToYUV422(YUV422Data* iData, float Y[2], float Cb[2], float Cr[2])
     }
 }
 
-static void YUV422PackedWrite(void* iFuncData, ImageBuffers* oBuffers, unsigned int iGlobalPos, uint16_t iRowPos, unsigned int iColor)
+static void YUV422PackedWrite(void* iFuncData, ImageBuffers* oBuffers, unsigned int iGlobalPos, uint16_t iWidthPos, uint16_t iHeightPos, unsigned int iColor)
 {
     YUV422Data* data = (YUV422Data*)iFuncData;
-    if (0 == iRowPos%2)
+    if (0 == iWidthPos%2)
     {
         data->globalPos = iGlobalPos;
         data->colors[0] = iColor;
@@ -139,10 +141,10 @@ static void YUV422PackedWrite(void* iFuncData, ImageBuffers* oBuffers, unsigned 
     ((unsigned short*)oBuffers->blocksData[0])[iGlobalPos] = (((unsigned char)Y[1])<<8) | (unsigned char)((Cr[0]+Cr[1])/2.f);
 }
 
-static void YUV422PlaneWrite(void* iFuncData, ImageBuffers* oBuffers, unsigned int iGlobalPos, uint16_t iRowPos, unsigned int iColor)
+static void YUV422PlaneWrite(void* iFuncData, ImageBuffers* oBuffers, unsigned int iGlobalPos, uint16_t iWidthPos, uint16_t iHeightPos, unsigned int iColor)
 {
     YUV422Data* data = (YUV422Data*)iFuncData;
-    if (0 == iRowPos%2)
+    if (0 == iWidthPos%2)
     {
         data->globalPos = iGlobalPos;
         data->colors[0] = iColor;
@@ -155,10 +157,51 @@ static void YUV422PlaneWrite(void* iFuncData, ImageBuffers* oBuffers, unsigned i
     float Cr[2];
     RGBToYUV422(data, Y, Cb, Cr);
 
-    ((unsigned char*)oBuffers->blocksData[0])[data->globalPos] = ((unsigned char)Y[0])<<8;
-    ((unsigned char*)oBuffers->blocksData[0])[iGlobalPos] = ((unsigned char)Y[1])<<8;
+    ((unsigned char*)oBuffers->blocksData[0])[data->globalPos] = (unsigned char)Y[0];
+    ((unsigned char*)oBuffers->blocksData[0])[iGlobalPos] = (unsigned char)Y[1];
     ((unsigned char*)oBuffers->blocksData[1])[data->globalPos] = (unsigned char)((Cb[0]+Cb[1])/2.f);
     ((unsigned char*)oBuffers->blocksData[2])[data->globalPos] = (unsigned char)((Cr[0]+Cr[1])/2.f);
+}
+
+typedef struct {
+    unsigned int globalPos[2];
+    unsigned int colors[4];
+} YUV420Data;
+
+static void RGBToYUV420(YUV420Data* iData, float Y[4], float Cb[4], float Cr[4])
+{
+    for (int i = 0; i < 4; i++)
+    {
+        unsigned int color = iData->colors[i];
+        float nR = (float)(color&0xFF);
+        float nG = (float)((color&0xFF00)>>8);
+        float nB = (float)((color&0xFF0000)>>16);
+        
+        Y[i] = convMat[0][0] * nR + convMat[0][1] * nG + convMat[0][2] * nB;
+        Cb[i] = convMat[1][0] * nR + convMat[1][1] * nG + convMat[1][2] * nB + 128.f;
+        Cr[i] = convMat[2][0] * nR + convMat[2][1] * nG + convMat[2][2] * nB + 128.f;
+    }
+}
+
+static void YUV420PlaneWrite(void* iFuncData, ImageBuffers* oBuffers, unsigned int iGlobalPos, uint16_t iWidthPos, uint16_t iHeightPos, unsigned int iColor)
+{
+    YUV420Data* data = (YUV420Data*)iFuncData;
+    unsigned int pixelPos = iWidthPos%2+((iHeightPos%2)<<1);
+    if (0 == iWidthPos%2)
+        data->globalPos[iHeightPos%2] = iGlobalPos;
+    data->colors[pixelPos] = iColor;
+    if (pixelPos < 3)
+        return;
+    
+    float Y[4];
+    float Cb[4];
+    float Cr[4];
+    RGBToYUV420(data, Y, Cb, Cr);
+
+    ((unsigned short*)oBuffers->blocksData[0])[data->globalPos[0]] = (unsigned char)Y[0] | (((unsigned char)Y[1])<<8);
+    ((unsigned short*)oBuffers->blocksData[0])[data->globalPos[1]] = (unsigned char)Y[2] | (((unsigned char)Y[3])<<8);
+    ((unsigned char*)oBuffers->blocksData[1])[data->globalPos[0]] = (unsigned char)((Cb[0]+Cb[1]+Cb[2]+Cb[3])/4.f);
+    ((unsigned char*)oBuffers->blocksData[2])[data->globalPos[0]] = (unsigned char)((Cr[0]+Cr[1]+Cr[2]+Cr[3])/4.f);
 }
 
 // Bitmap reading functions
@@ -166,13 +209,13 @@ static void YUV422PlaneWrite(void* iFuncData, ImageBuffers* oBuffers, unsigned i
 static int LoadBMPGeneric(BITMAPFILEHEADER *bmp_fh, BITMAPINFOHEADER *bmp_ih, SceUID iFile,
                           ImageBuffers* oBuffers, BufferWriteFunc iWriteFunc, void* iFuncData)
 {    
-    unsigned int row_stride = bmp_ih->biWidth * (bmp_ih->biBitCount/8);
-    if (row_stride%4 != 0) {
-        row_stride += 4-(row_stride%4);
+    unsigned int block_stride = bmp_ih->biWidth * (bmp_ih->biBitCount/8) * oBuffers->heightAlign;
+    if (block_stride%4 != 0) {
+        block_stride += 4-(block_stride%4);
     }
 
-    unsigned int size = alignSizeForMemBlock(row_stride);
-    SceUID bufferID = sceKernelAllocMemBlock("bitmap_row", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, size, NULL);
+    unsigned int size = alignSizeForMemBlock(block_stride);
+    SceUID bufferID = sceKernelAllocMemBlock("bitmap_block", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, size, NULL);
     void *buffer = NULL;
     sceKernelGetMemBlockBase(bufferID, (void **)&buffer);
     if (!buffer) {
@@ -181,38 +224,43 @@ static int LoadBMPGeneric(BITMAPFILEHEADER *bmp_fh, BITMAPINFOHEADER *bmp_ih, Sc
 
     sceIoLseek(iFile, bmp_fh->bfOffBits, SCE_SEEK_SET);
 
-    unsigned int alignedWidth = (bmp_ih->biWidth/oBuffers->rowAlign)*oBuffers->rowAlign;
-    int i, x, y;
-    for (i = 0; i < bmp_ih->biHeight; i++)
+    unsigned int alignedWidth = (bmp_ih->biWidth/oBuffers->widthAlign)*oBuffers->widthAlign;
+    unsigned int alignedHeight = (bmp_ih->biHeight/oBuffers->heightAlign)*oBuffers->heightAlign;
+    unsigned int blocksCount = alignedHeight / oBuffers->heightAlign;
+    int i, j, x, y;
+    for (i = 0; i < blocksCount; i++)
     {
-        sceIoRead(iFile, buffer, row_stride);
+        sceIoRead(iFile, buffer, block_stride);
 
-        y = bmp_ih->biHeight - 1 - i;
-        unsigned int texelPos = y*alignedWidth;
-
-        for (x = 0; x < alignedWidth; x++)
+        for (j = 0; j < oBuffers->heightAlign ; j++)
         {
-            unsigned int imgColor = 0;
-            if (bmp_ih->biBitCount == 32) {		//BGRA8888
-                unsigned int color = *(unsigned int *)(buffer + x*4);
-                imgColor = ((color>>24)&0xFF)<<24 | (color&0xFF)<<16 |
-                    ((color>>8)&0xFF)<<8 | ((color>>16)&0xFF);
+            y = i*oBuffers->heightAlign + j;
+            unsigned int texelPos = (alignedHeight - 1 - y)*alignedWidth;
 
-            } else if (bmp_ih->biBitCount == 24) {	//BGR888
-                unsigned char *address = buffer + x*3;
-                imgColor = (*address)<<16 | (*(address+1))<<8 |
-                    (*(address+2)) | (0xFF<<24);
+            for (x = 0; x < alignedWidth; x++)
+            {
+                unsigned int imgColor = 0;
+                if (bmp_ih->biBitCount == 32) {		//BGRA8888
+                    unsigned int color = *(unsigned int *)(buffer + x*4);
+                    imgColor = ((color>>24)&0xFF)<<24 | (color&0xFF)<<16 |
+                        ((color>>8)&0xFF)<<8 | ((color>>16)&0xFF);
 
-            } else if (bmp_ih->biBitCount == 16) {	//BGR565
-                unsigned int color = *(unsigned short *)(buffer + x*2);
-                unsigned char r = (color       & 0x1F)  *((float)255/31);
-                unsigned char g = ((color>>5)  & 0x3F)  *((float)255/63);
-                unsigned char b = ((color>>11) & 0x1F)  *((float)255/31);
-                imgColor = ((r<<16) | (g<<8) | b | (0xFF<<24));
+                } else if (bmp_ih->biBitCount == 24) {	//BGR888
+                    unsigned char *address = buffer + x*3;
+                    imgColor = (*address)<<16 | (*(address+1))<<8 |
+                        (*(address+2)) | (0xFF<<24);
+
+                } else if (bmp_ih->biBitCount == 16) {	//BGR565
+                    unsigned int color = *(unsigned short *)(buffer + x*2);
+                    unsigned char r = (color       & 0x1F)  *((float)255/31);
+                    unsigned char g = ((color>>5)  & 0x3F)  *((float)255/63);
+                    unsigned char b = ((color>>11) & 0x1F)  *((float)255/31);
+                    imgColor = ((r<<16) | (g<<8) | b | (0xFF<<24));
+                }
+
+                iWriteFunc(iFuncData, oBuffers, texelPos, x, y, imgColor);
+                texelPos++;
             }
-
-            iWriteFunc(iFuncData, oBuffers, texelPos, x, imgColor);
-            texelPos++;
         }
     }
 
@@ -231,14 +279,18 @@ static int LoadBMPFile(SceUID iFile, SceCameraFormat iFormat, char* iMemName, Im
     sceIoRead(iFile, (void *)&bmp_ih, sizeof(BITMAPINFOHEADER));
 
     BufferWriteFunc writeFunc = NULL;
-    char funcData[12];
+    char funcData[20];
     
     oBuffers->imageWidth = bmp_ih.biWidth;
     oBuffers->imageHeight = bmp_ih.biHeight;
     oBuffers->rowStride[0] = 0;
     oBuffers->rowStride[1] = 0;
     oBuffers->rowStride[2] = 0;
-    oBuffers->rowAlign = 1;
+    oBuffers->rowDepend[0] = 1;
+    oBuffers->rowDepend[1] = 1;
+    oBuffers->rowDepend[2] = 1;
+    oBuffers->widthAlign = 1;
+    oBuffers->heightAlign = 1;
 
     switch (iFormat)
     {
@@ -255,7 +307,7 @@ static int LoadBMPFile(SceUID iFile, SceCameraFormat iFormat, char* iMemName, Im
     case SCE_CAMERA_FORMAT_YUV422_PACKED:
         oBuffers->texelBits[0] = 16;
         oBuffers->rowStride[0] = 2*bmp_ih.biWidth;
-        oBuffers->rowAlign = 2;
+        oBuffers->widthAlign = 2;
         writeFunc = &YUV422PackedWrite;
         break;
     case SCE_CAMERA_FORMAT_YUV422_PLANE:
@@ -265,10 +317,22 @@ static int LoadBMPFile(SceUID iFile, SceCameraFormat iFormat, char* iMemName, Im
         oBuffers->rowStride[1] = bmp_ih.biWidth/2;
         oBuffers->texelBits[2] = 4;
         oBuffers->rowStride[2] = bmp_ih.biWidth/2;
-        oBuffers->rowAlign = 2;
+        oBuffers->widthAlign = 2;
         writeFunc = &YUV422PlaneWrite;
         break;
     case SCE_CAMERA_FORMAT_YUV420_PLANE:
+        oBuffers->texelBits[0] = 8;
+        oBuffers->rowStride[0] = bmp_ih.biWidth;
+        oBuffers->texelBits[1] = 2;
+        oBuffers->rowStride[1] = bmp_ih.biWidth/4;
+        oBuffers->rowDepend[1] = 2;
+        oBuffers->texelBits[2] = 2;
+        oBuffers->rowStride[2] = bmp_ih.biWidth/4;
+        oBuffers->rowDepend[2] = 2;
+        oBuffers->widthAlign = 2;
+        oBuffers->heightAlign = 2;
+        writeFunc = &YUV420PlaneWrite;
+        break;
     case SCE_CAMERA_FORMAT_RAW8:
     case SCE_CAMERA_FORMAT_INVALID:
         return -1;
@@ -357,8 +421,8 @@ static void* IBufferOnOpen[NB_CAM] = {NULL, NULL};
 static void* UBufferOnOpen[NB_CAM] = {NULL, NULL};
 static void* VBufferOnOpen[NB_CAM] = {NULL, NULL};
 
-static ImageBuffers imageBuffers[NB_CAM] = { { {-1, -1, -1}, {NULL, NULL, NULL}, {0, 0, 0}, {0, 0, 0}, 0, 0, -1} ,
-                                             { {-1, -1, -1}, {NULL, NULL, NULL}, {0, 0, 0}, {0, 0, 0}, 0, 0, -1} };
+static ImageBuffers imageBuffers[NB_CAM] = { { {-1, -1, -1}, {NULL, NULL, NULL}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, 0, 0, 0, -1} ,
+                                             { {-1, -1, -1}, {NULL, NULL, NULL}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, 0, 0, 0, -1} };
 static SceCameraFormat imageFormat[NB_CAM] = {0, 0};
 #endif
 
@@ -584,7 +648,8 @@ static int hook_sceCameraRead(int devnum, SceCameraRead *pRead)
 
                 unsigned int widthOffset = (unsigned int)((1.f + widthOffsetRate) * (float)abs(widthLeft) / 2.f);
                 unsigned int heightOffset = (unsigned int)((1.f + heightOffsetRate) * (float)abs(heightLeft) / 2.f);
-                widthOffset = (widthOffset/imageBuf->rowAlign)*imageBuf->rowAlign;
+                widthOffset = (widthOffset/imageBuf->widthAlign)*imageBuf->widthAlign;
+                heightOffset = (heightOffset/imageBuf->heightAlign)*imageBuf->heightAlign;
 
                 unsigned int bufWidthOffset = 0;
                 unsigned int imgWidthOffset = 0;
@@ -622,25 +687,26 @@ static int hook_sceCameraRead(int devnum, SceCameraRead *pRead)
                     char* image = (imageBuf->blockIDs[i] >= 0) ? imageBuf->blocksData[i] : NULL;
                     if (NULL != buffers[i] && NULL != image)
                     {
-                        unsigned int texelBits = imageBuf->texelBits[i];
+                        unsigned int rowDepend = imageBuf->rowDepend[i];
+                        unsigned int texelDependBits = imageBuf->texelBits[i]*rowDepend;
 
-                        for (int row = 0; row < bufHeightOffset; row++)
-                            memset(buffers[i]+bitSize(row*bufRowTexels,texelBits), 0, bitSize(bufRowTexels,texelBits));
+                        for (int row = 0; row < bufHeightOffset/rowDepend; row++)
+                            memset(buffers[i]+bitSize(row*bufRowTexels,texelDependBits), 0, bitSize(bufRowTexels,texelDependBits));
 
-                        for (int row = 0 ; row < minRowCount ; row++)
-                            memcpy(buffers[i]+bitSize(row*bufRowTexels+bufOffset,texelBits), image+bitSize(row*imgRowTexels+imgOffset,texelBits), bitSize(minRowTexels,texelBits));
+                        for (int row = 0 ; row < minRowCount/rowDepend ; row++)
+                            memcpy(buffers[i]+bitSize(row*bufRowTexels+bufOffset,texelDependBits), image+bitSize(row*imgRowTexels+imgOffset,texelDependBits), bitSize(minRowTexels,texelDependBits));
                         
                         if (imgRowTexels < bufRowTexels)
                         {
-                            for (int row = bufHeightOffset ; row < bufHeightOffset+minRowCount ; row++)
+                            for (int row = bufHeightOffset ; row < (bufHeightOffset+minRowCount)/rowDepend ; row++)
                             {
-                                memset(buffers[i]+bitSize(row*bufRowTexels,texelBits), 0, bitSize(bufWidthOffset,texelBits));
-                                memset(buffers[i]+bitSize(row*bufRowTexels+bufWidthOffset+imgRowTexels,texelBits), 0, bitSize(bufRowTexels-bufWidthOffset-imgRowTexels,texelBits));
+                                memset(buffers[i]+bitSize(row*bufRowTexels,texelDependBits), 0, bitSize(bufWidthOffset,texelDependBits));
+                                memset(buffers[i]+bitSize(row*bufRowTexels+bufWidthOffset+imgRowTexels,texelDependBits), 0, bitSize(bufRowTexels-bufWidthOffset-imgRowTexels,texelDependBits));
                             }
                         }
 
-                        for (int row = bufHeightOffset+minRowCount; row < bufRowCount; row++)
-                            memset(buffers[i]+bitSize(row*bufRowTexels,texelBits), 0, bitSize(bufRowTexels,texelBits));
+                        for (int row = bufHeightOffset+minRowCount; row < bufRowCount/rowDepend; row++)
+                            memset(buffers[i]+bitSize(row*bufRowTexels,texelDependBits), 0, bitSize(bufRowTexels,texelDependBits));
                     }
                 }
             }
