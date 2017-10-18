@@ -99,12 +99,12 @@ static void ARGBWrite(void* iFuncData, ImageBuffers* oBuffers, unsigned int iGlo
     ((unsigned int*)oBuffers->blocksData[0])[iGlobalPos] = (iColor&0xFF00FF00) | (iColor&0xFF)<<16 | (iColor&0xFF0000)>>16;
 }
 
+float convMat[3][3] = { {0.299f, 0.587f, 0.114f}, {-0.14317f, -0.28886f, 0.436f}, {0.615f, -0.51499f, -0.10001f} };
+
 typedef struct {
     unsigned int globalPos;
     unsigned int colors[2];
 } YUV422Data;
-
-float convMat[3][3] = { {0.299f, 0.587f, 0.114f}, {-0.14317f, -0.28886f, 0.436f}, {0.615f, -0.51499f, -0.10001f} };
 
 static void RGBToYUV422(YUV422Data* iData, float Y[2], float Cb[2], float Cr[2])
 {
@@ -159,8 +159,8 @@ static void YUV422PlaneWrite(void* iFuncData, ImageBuffers* oBuffers, unsigned i
 
     ((unsigned char*)oBuffers->blocksData[0])[data->globalPos] = (unsigned char)Y[0];
     ((unsigned char*)oBuffers->blocksData[0])[iGlobalPos] = (unsigned char)Y[1];
-    ((unsigned char*)oBuffers->blocksData[1])[data->globalPos] = (unsigned char)((Cb[0]+Cb[1])/2.f);
-    ((unsigned char*)oBuffers->blocksData[2])[data->globalPos] = (unsigned char)((Cr[0]+Cr[1])/2.f);
+    ((unsigned char*)oBuffers->blocksData[1])[data->globalPos/2] = (unsigned char)((Cb[0]+Cb[1])/2.f);
+    ((unsigned char*)oBuffers->blocksData[2])[data->globalPos/2] = (unsigned char)((Cr[0]+Cr[1])/2.f);
 }
 
 typedef struct {
@@ -186,11 +186,11 @@ static void RGBToYUV420(YUV420Data* iData, float Y[4], float Cb[4], float Cr[4])
 static void YUV420PlaneWrite(void* iFuncData, ImageBuffers* oBuffers, unsigned int iGlobalPos, uint16_t iWidthPos, uint16_t iHeightPos, unsigned int iColor)
 {
     YUV420Data* data = (YUV420Data*)iFuncData;
-    unsigned int pixelPos = iWidthPos%2+((iHeightPos%2)<<1);
+    unsigned int pixelPosInBlock = iWidthPos%2+((iHeightPos%2)<<1);
     if (0 == iWidthPos%2)
         data->globalPos[iHeightPos%2] = iGlobalPos;
-    data->colors[pixelPos] = iColor;
-    if (pixelPos < 3)
+    data->colors[pixelPosInBlock] = iColor;
+    if (pixelPosInBlock < 3)
         return;
     
     float Y[4];
@@ -198,21 +198,45 @@ static void YUV420PlaneWrite(void* iFuncData, ImageBuffers* oBuffers, unsigned i
     float Cr[4];
     RGBToYUV420(data, Y, Cb, Cr);
 
-    ((unsigned short*)oBuffers->blocksData[0])[data->globalPos[0]] = (unsigned char)Y[0] | (((unsigned char)Y[1])<<8);
-    ((unsigned short*)oBuffers->blocksData[0])[data->globalPos[1]] = (unsigned char)Y[2] | (((unsigned char)Y[3])<<8);
-    ((unsigned char*)oBuffers->blocksData[1])[data->globalPos[0]] = (unsigned char)((Cb[0]+Cb[1]+Cb[2]+Cb[3])/4.f);
-    ((unsigned char*)oBuffers->blocksData[2])[data->globalPos[0]] = (unsigned char)((Cr[0]+Cr[1]+Cr[2]+Cr[3])/4.f);
+    ((unsigned short*)oBuffers->blocksData[0])[data->globalPos[0]/2] = (unsigned char)Y[0] | (((unsigned char)Y[1])<<8);
+    ((unsigned short*)oBuffers->blocksData[0])[data->globalPos[1]/2] = (unsigned char)Y[2] | (((unsigned char)Y[3])<<8);
+    ((unsigned char*)oBuffers->blocksData[1])[(data->globalPos[1]+(iWidthPos-1))/4] = (unsigned char)((Cb[0]+Cb[1]+Cb[2]+Cb[3])/4.f);
+    ((unsigned char*)oBuffers->blocksData[2])[(data->globalPos[1]+(iWidthPos-1))/4] = (unsigned char)((Cr[0]+Cr[1]+Cr[2]+Cr[3])/4.f);
 }
 
 // Bitmap reading functions
 
+static unsigned int ReadColor(void* buffer, unsigned short bitCount, unsigned int row_stride, int col, int row)
+{
+    unsigned int imgColor = 0;
+    if (bitCount == 32) {		//BGRA8888
+        unsigned int color = *(unsigned int *)(buffer + row*row_stride + col*4);
+        imgColor = ((color>>24)&0xFF)<<24 | (color&0xFF)<<16 |
+            ((color>>8)&0xFF)<<8 | ((color>>16)&0xFF);
+
+    } else if (bitCount == 24) {	//BGR888
+        unsigned char *address = buffer + row*row_stride + col*3;
+        imgColor = (*address)<<16 | (*(address+1))<<8 |
+            (*(address+2)) | (0xFF<<24);
+
+    } else if (bitCount == 16) {	//BGR565
+        unsigned int color = *(unsigned short *)(buffer + row*row_stride + col*2);
+        unsigned char r = (color       & 0x1F)  *((float)255/31);
+        unsigned char g = ((color>>5)  & 0x3F)  *((float)255/63);
+        unsigned char b = ((color>>11) & 0x1F)  *((float)255/31);
+        imgColor = ((r<<16) | (g<<8) | b | (0xFF<<24));
+    }
+    return imgColor;
+}
+
 static int LoadBMPGeneric(BITMAPFILEHEADER *bmp_fh, BITMAPINFOHEADER *bmp_ih, SceUID iFile,
                           ImageBuffers* oBuffers, BufferWriteFunc iWriteFunc, void* iFuncData)
 {    
-    unsigned int block_stride = bmp_ih->biWidth * (bmp_ih->biBitCount/8) * oBuffers->heightAlign;
-    if (block_stride%4 != 0) {
-        block_stride += 4-(block_stride%4);
+    unsigned int row_stride = bmp_ih->biWidth * (bmp_ih->biBitCount/8);
+    if (row_stride%4 != 0) {
+        row_stride += 4-(row_stride%4);
     }
+    unsigned int block_stride = row_stride * oBuffers->heightAlign;
 
     unsigned int size = alignSizeForMemBlock(block_stride);
     SceUID bufferID = sceKernelAllocMemBlock("bitmap_block", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, size, NULL);
@@ -224,42 +248,50 @@ static int LoadBMPGeneric(BITMAPFILEHEADER *bmp_fh, BITMAPINFOHEADER *bmp_ih, Sc
 
     sceIoLseek(iFile, bmp_fh->bfOffBits, SCE_SEEK_SET);
 
-    unsigned int alignedWidth = (bmp_ih->biWidth/oBuffers->widthAlign)*oBuffers->widthAlign;
-    unsigned int alignedHeight = (bmp_ih->biHeight/oBuffers->heightAlign)*oBuffers->heightAlign;
+    unsigned int alignedWidth = oBuffers->imageWidth;
+    unsigned int alignedHeight = oBuffers->imageHeight;
     unsigned int blocksCount = alignedHeight / oBuffers->heightAlign;
-    int i, j, x, y;
-    for (i = 0; i < blocksCount; i++)
+ 
+    int b, i, j, x, y;
+    if (oBuffers->heightAlign > 1)
     {
-        sceIoRead(iFile, buffer, block_stride);
-
-        for (j = 0; j < oBuffers->heightAlign ; j++)
+        for (b = 0; b < blocksCount; b++)
         {
-            y = i*oBuffers->heightAlign + j;
-            unsigned int texelPos = (alignedHeight - 1 - y)*alignedWidth;
+            sceIoRead(iFile, buffer, block_stride);
 
-            for (x = 0; x < alignedWidth; x++)
+            for (i = 0; i < alignedWidth; i+=oBuffers->widthAlign)
             {
-                unsigned int imgColor = 0;
-                if (bmp_ih->biBitCount == 32) {		//BGRA8888
-                    unsigned int color = *(unsigned int *)(buffer + x*4);
-                    imgColor = ((color>>24)&0xFF)<<24 | (color&0xFF)<<16 |
-                        ((color>>8)&0xFF)<<8 | ((color>>16)&0xFF);
+                for (j = 0; j < oBuffers->heightAlign ; j++)
+                {
+                    y = b*oBuffers->heightAlign + j;
 
-                } else if (bmp_ih->biBitCount == 24) {	//BGR888
-                    unsigned char *address = buffer + x*3;
-                    imgColor = (*address)<<16 | (*(address+1))<<8 |
-                        (*(address+2)) | (0xFF<<24);
-
-                } else if (bmp_ih->biBitCount == 16) {	//BGR565
-                    unsigned int color = *(unsigned short *)(buffer + x*2);
-                    unsigned char r = (color       & 0x1F)  *((float)255/31);
-                    unsigned char g = ((color>>5)  & 0x3F)  *((float)255/63);
-                    unsigned char b = ((color>>11) & 0x1F)  *((float)255/31);
-                    imgColor = ((r<<16) | (g<<8) | b | (0xFF<<24));
+                    for (x = i; x < i+oBuffers->widthAlign; x++)
+                    {
+                        unsigned int globalPos = (alignedHeight - 1 - y)*alignedWidth + x;
+                        unsigned int imgColor = ReadColor(buffer, bmp_ih->biBitCount, row_stride, x, j);
+                        iWriteFunc(iFuncData, oBuffers, globalPos, x, y, imgColor);
+                    }
                 }
+            }
+        }
+    }
+    else
+    {
+        for (i = 0; i < blocksCount; i++)
+        {
+            sceIoRead(iFile, buffer, block_stride);
 
-                iWriteFunc(iFuncData, oBuffers, texelPos, x, y, imgColor);
-                texelPos++;
+            for (j = 0; j < oBuffers->heightAlign ; j++)
+            {
+                y = i*oBuffers->heightAlign + j;
+                unsigned int globalPos = (alignedHeight - 1 - y)*alignedWidth;
+
+                for (x = 0; x < alignedWidth; x++)
+                {
+                    unsigned int imgColor = ReadColor(buffer, bmp_ih->biBitCount, row_stride, x, 0);
+                    iWriteFunc(iFuncData, oBuffers, globalPos, x, y, imgColor);
+                    globalPos++;
+                }
             }
         }
     }
@@ -279,7 +311,7 @@ static int LoadBMPFile(SceUID iFile, SceCameraFormat iFormat, char* iMemName, Im
     sceIoRead(iFile, (void *)&bmp_ih, sizeof(BITMAPINFOHEADER));
 
     BufferWriteFunc writeFunc = NULL;
-    char funcData[20];
+    char funcData[24];
     
     oBuffers->imageWidth = bmp_ih.biWidth;
     oBuffers->imageHeight = bmp_ih.biHeight;
@@ -296,38 +328,29 @@ static int LoadBMPFile(SceUID iFile, SceCameraFormat iFormat, char* iMemName, Im
     {
     case SCE_CAMERA_FORMAT_ARGB:
         oBuffers->texelBits[0] = 32;
-        oBuffers->rowStride[0] = 4*bmp_ih.biWidth;
         writeFunc = &ARGBWrite;
         break;
     case SCE_CAMERA_FORMAT_ABGR:
         oBuffers->texelBits[0] = 32;
-        oBuffers->rowStride[0] = 4*bmp_ih.biWidth;
         writeFunc = &ABGRWrite;
         break;
     case SCE_CAMERA_FORMAT_YUV422_PACKED:
         oBuffers->texelBits[0] = 16;
-        oBuffers->rowStride[0] = 2*bmp_ih.biWidth;
         oBuffers->widthAlign = 2;
         writeFunc = &YUV422PackedWrite;
         break;
     case SCE_CAMERA_FORMAT_YUV422_PLANE:
         oBuffers->texelBits[0] = 8;
-        oBuffers->rowStride[0] = bmp_ih.biWidth;
         oBuffers->texelBits[1] = 4;
-        oBuffers->rowStride[1] = bmp_ih.biWidth/2;
         oBuffers->texelBits[2] = 4;
-        oBuffers->rowStride[2] = bmp_ih.biWidth/2;
         oBuffers->widthAlign = 2;
         writeFunc = &YUV422PlaneWrite;
         break;
     case SCE_CAMERA_FORMAT_YUV420_PLANE:
         oBuffers->texelBits[0] = 8;
-        oBuffers->rowStride[0] = bmp_ih.biWidth;
         oBuffers->texelBits[1] = 2;
-        oBuffers->rowStride[1] = bmp_ih.biWidth/4;
         oBuffers->rowDepend[1] = 2;
         oBuffers->texelBits[2] = 2;
-        oBuffers->rowStride[2] = bmp_ih.biWidth/4;
         oBuffers->rowDepend[2] = 2;
         oBuffers->widthAlign = 2;
         oBuffers->heightAlign = 2;
@@ -340,14 +363,18 @@ static int LoadBMPFile(SceUID iFile, SceCameraFormat iFormat, char* iMemName, Im
     
     if (NULL == writeFunc)
         return -1;
-    
+
+    oBuffers->imageWidth = (bmp_ih.biWidth/oBuffers->widthAlign)*oBuffers->widthAlign;
+    oBuffers->imageHeight = (bmp_ih.biHeight/oBuffers->heightAlign)*oBuffers->heightAlign;
+
     char memname[48];
     for (int i = 0; i < 3; i++)
     {
-        if (oBuffers->rowStride[i] > 0 && oBuffers->texelBits[i] > 0)
+        oBuffers->rowStride[i] = (oBuffers->imageWidth*oBuffers->texelBits[i]*oBuffers->rowDepend[i])/8;
+        if (oBuffers->rowStride[i] > 0)
         {
             sprintf(memname, "%s_%d", iMemName, i);
-            unsigned int size = alignSizeForMemBlock(oBuffers->rowStride[i]*bmp_ih.biHeight);
+            unsigned int size = alignSizeForMemBlock(oBuffers->rowStride[i]*oBuffers->imageHeight/oBuffers->rowDepend[i]);
             oBuffers->blockIDs[i] = sceKernelAllocMemBlock(memname, SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, size, NULL);
             oBuffers->blocksData[i] = NULL;
             sceKernelGetMemBlockBase(oBuffers->blockIDs[i], (void **)&oBuffers->blocksData[i]);
