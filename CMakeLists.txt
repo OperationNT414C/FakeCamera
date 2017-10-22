@@ -16,3 +16,4 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -fno-rtti -fno-exceptions")
 
 add_subdirectory(FakeCamera)
 add_subdirectory(FakeCameraBMP)
+add_subdirectory(FakeCameraKBMP)
