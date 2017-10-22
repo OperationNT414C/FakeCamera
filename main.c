@@ -11,6 +11,10 @@
 #include <psp2/appmgr.h>
 #include <psp2/kernel/sysmem.h>
 
+#ifdef READ_WITH_KUIO
+#include <kuio.h>
+#endif
+
 #include <DSMotionLibrary.h>
 
 #include <stdlib.h>
@@ -246,7 +250,11 @@ static int LoadBMPGeneric(BITMAPFILEHEADER *bmp_fh, BITMAPINFOHEADER *bmp_ih, Sc
         return -1;
     }
 
+#ifdef READ_WITH_KUIO
+    kuIoLseek(iFile, bmp_fh->bfOffBits, SCE_SEEK_SET);
+#else
     sceIoLseek(iFile, bmp_fh->bfOffBits, SCE_SEEK_SET);
+#endif
 
     unsigned int alignedWidth = oBuffers->imageWidth;
     unsigned int alignedHeight = oBuffers->imageHeight;
@@ -257,7 +265,11 @@ static int LoadBMPGeneric(BITMAPFILEHEADER *bmp_fh, BITMAPINFOHEADER *bmp_ih, Sc
     {
         for (b = 0; b < blocksCount; b++)
         {
+        #ifdef READ_WITH_KUIO
+            kuIoRead(iFile, buffer, block_stride);
+        #else
             sceIoRead(iFile, buffer, block_stride);
+        #endif
 
             for (i = 0; i < alignedWidth; i+=oBuffers->widthAlign)
             {
@@ -279,7 +291,11 @@ static int LoadBMPGeneric(BITMAPFILEHEADER *bmp_fh, BITMAPINFOHEADER *bmp_ih, Sc
     {
         for (i = 0; i < blocksCount; i++)
         {
+        #ifdef READ_WITH_KUIO
+            kuIoRead(iFile, buffer, block_stride);
+        #else
             sceIoRead(iFile, buffer, block_stride);
+        #endif
 
             for (j = 0; j < oBuffers->heightAlign ; j++)
             {
@@ -303,12 +319,20 @@ static int LoadBMPGeneric(BITMAPFILEHEADER *bmp_fh, BITMAPINFOHEADER *bmp_ih, Sc
 static int LoadBMPFile(SceUID iFile, SceCameraFormat iFormat, char* iMemName, ImageBuffers* oBuffers)
 {
     BITMAPFILEHEADER bmp_fh;
+#ifdef READ_WITH_KUIO
+    kuIoRead(iFile, (void *)&bmp_fh, sizeof(BITMAPFILEHEADER));
+#else
     sceIoRead(iFile, (void *)&bmp_fh, sizeof(BITMAPFILEHEADER));
+#endif
     if (bmp_fh.bfType != BMP_SIGNATURE)
         return -1;
 
     BITMAPINFOHEADER bmp_ih;
+#ifdef READ_WITH_KUIO
+    kuIoRead(iFile, (void *)&bmp_ih, sizeof(BITMAPINFOHEADER));
+#else
     sceIoRead(iFile, (void *)&bmp_ih, sizeof(BITMAPINFOHEADER));
+#endif
 
     BufferWriteFunc writeFunc = NULL;
     char funcData[24];
@@ -451,10 +475,15 @@ static void* VBufferOnOpen[NB_CAM] = {NULL, NULL};
 static ImageBuffers imageBuffers[NB_CAM] = { { {-1, -1, -1}, {NULL, NULL, NULL}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, 0, 0, 0, -1} ,
                                              { {-1, -1, -1}, {NULL, NULL, NULL}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, 0, 0, 0, -1} };
 static SceCameraFormat imageFormat[NB_CAM] = {0, 0};
+
+static int prevWidthOffset[NB_CAM] = {-1, -1};
+static int prevHeightOffset[NB_CAM] = {-1, -1};
+static void* prevBuffers[NB_CAM][3] = { {NULL, NULL, NULL}, {NULL, NULL, NULL} };
 #endif
 
 static int cameraOpened[NB_CAM] = {0, 0};
 static uint16_t framerate[NB_CAM];
+static uint64_t prevFrame[NB_CAM] = {0, 0};
 
 static tai_hook_ref_t ref_hook0;
 static int hook_sceCameraOpen(int devnum, SceCameraInfo *pInfo)
@@ -522,21 +551,38 @@ static int hook_sceCameraOpen(int devnum, SceCameraInfo *pInfo)
                 char* camname = (1 == devnum)?"Back":"Front";
                 sprintf(memname, "%s_%s", titleid, camname);
                 sprintf(pathname, "ux0:/data/FakeCamera/%s_%s.bmp", titleid, memname);
+            #ifdef READ_WITH_KUIO
+                SceUID fd = -1;
+                kuIoOpen(pathname, SCE_O_RDONLY, &fd);
+            #else
                 SceUID fd = sceIoOpen(pathname, SCE_O_RDONLY, 0666);
+            #endif
                 if (fd < 0)
                 {
                     sprintf(pathname, "ux0:/data/FakeCamera/%s.bmp", titleid);
+                #ifdef READ_WITH_KUIO
+                    kuIoOpen(pathname, SCE_O_RDONLY, &fd);
+                #else
                     fd = sceIoOpen(pathname, SCE_O_RDONLY, 0666);
+                #endif
                 }
                 if (fd < 0)
                 {
                     sprintf(pathname, "ux0:/data/FakeCamera/ALL_%s.bmp", camname);
+                #ifdef READ_WITH_KUIO
+                    kuIoOpen(pathname, SCE_O_RDONLY, &fd);
+                #else
                     fd = sceIoOpen(pathname, SCE_O_RDONLY, 0666);
+                #endif
                 }
                 if (fd < 0)
                 {
                     sprintf(pathname, "ux0:/data/FakeCamera/ALL.bmp");
+                #ifdef READ_WITH_KUIO
+                    kuIoOpen(pathname, SCE_O_RDONLY, &fd);
+                #else
                     fd = sceIoOpen(pathname, SCE_O_RDONLY, 0666);
+                #endif
                 }
                 if (fd >= 0)
                 {
@@ -554,7 +600,11 @@ static int hook_sceCameraOpen(int devnum, SceCameraInfo *pInfo)
                         //LOG(" => Failed\n");
                     }
                     //log_flush();
+                #ifdef READ_WITH_KUIO
+                    kuIoClose(fd);
+                #else
                     sceIoClose(fd);
+                #endif
                 }
             }
         #endif
@@ -619,6 +669,15 @@ static int hook_sceCameraStop(int devnum)
     
     if ((unsigned int)devnum < NB_CAM)
     {
+        prevFrame[devnum] = 0;
+    #ifdef ENABLE_BMP
+        prevWidthOffset[devnum] = -1;
+        prevHeightOffset[devnum] = -1;
+        prevBuffers[devnum][0] = NULL;
+        prevBuffers[devnum][1] = NULL;
+        prevBuffers[devnum][2] = NULL;
+    #endif
+
         cameraActive[devnum] = 0;
         if (res < 0) res = 0;
     }
@@ -634,18 +693,54 @@ static int hook_sceCameraRead(int devnum, SceCameraRead *pRead)
     int res = TAI_CONTINUE(int, ref_hook4, devnum, pRead);
     
     if ((unsigned int)devnum < NB_CAM && NULL != pRead && cameraActive[devnum])
-    {
-        sceKernelDelayThread(1); // Release current thread time quantum to avoid freeze in some games (Frobisher Says)
-        
+    {        
         uint64_t newTimeStamp = sceKernelGetProcessTimeWide();
-        uint64_t fakeTimeStamp = (newTimeStamp+prevTimeStamp[devnum])>>1;
-        uint64_t fakeFrame = (((fakeTimeStamp-initTimeStamp[devnum])*framerate[devnum])>>22) + 1;
+
         if (res < 0)
         {
+            sceKernelDelayThread(1); // Release current thread time quantum to avoid freeze in some games (Frobisher Says)
+
+            uint64_t fakeTimeStamp = (newTimeStamp+prevTimeStamp[devnum])>>1;
+            uint64_t fakeFrame = (((fakeTimeStamp-initTimeStamp[devnum])*framerate[devnum])>>21) + 1;
+
+            pRead->status = 0;
+            if (0 == pRead->mode)
+            {
+                // Simulate "wait next frame" time
+                while (prevFrame[devnum] >= fakeFrame)
+                {
+                    sceKernelDelayThread(1000);
+                    newTimeStamp = sceKernelGetProcessTimeWide();
+                    fakeTimeStamp = (newTimeStamp+prevTimeStamp[devnum])>>1;
+                    fakeFrame = (((fakeTimeStamp-initTimeStamp[devnum])*framerate[devnum])>>21) + 1;
+                }
+            }
+            else if (prevFrame[devnum] >= fakeFrame)
+                pRead->status = 2;
+
         #ifdef ENABLE_BMP
             ImageBuffers* imageBuf = &imageBuffers[devnum];
-            if (imageBuf->ready > 0 && width[devnum] > 0 && height[devnum] > 0)
+
+            char* buffers[3] = {NULL, NULL, NULL};
+            if (NULL == ((SceCameraRead2*)pRead)->unknownNullCheck && sizeof(SceCameraRead2) == pRead->size)
             {
+                SceCameraRead2* pRead2 = (SceCameraRead2*)pRead;
+                buffers[0] = (NULL != IBufferOnOpen[devnum]) ? IBufferOnOpen[devnum] : pRead2->pIBase;
+                buffers[1] = (NULL != UBufferOnOpen[devnum]) ? UBufferOnOpen[devnum] : pRead2->pUBase;
+                buffers[2] = (NULL != VBufferOnOpen[devnum]) ? VBufferOnOpen[devnum] : pRead2->pVBase;
+            }
+            else
+            {
+                buffers[0] = (NULL != IBufferOnOpen[devnum]) ? IBufferOnOpen[devnum] : pRead->pIBase;
+                buffers[1] = (NULL != UBufferOnOpen[devnum]) ? UBufferOnOpen[devnum] : pRead->pUBase;
+                buffers[2] = (NULL != VBufferOnOpen[devnum]) ? VBufferOnOpen[devnum] : pRead->pVBase;
+            }
+            
+            int buffersTest = (prevBuffers[devnum][0] != buffers[0] || prevBuffers[devnum][1] != buffers[1] || prevBuffers[devnum][2] != buffers[2]);
+            if (imageBuf->ready > 0 && width[devnum] > 0 && height[devnum] > 0 && (prevFrame[devnum] < fakeFrame || buffersTest))
+            {
+                prevFrame[devnum] = fakeFrame;
+
                 float widthOffsetRate = 0.f;
                 float heightOffsetRate = 0.f;
 
@@ -677,7 +772,7 @@ static int hook_sceCameraRead(int devnum, SceCameraRead *pRead)
                 unsigned int heightOffset = (unsigned int)((1.f + heightOffsetRate) * (float)abs(heightLeft) / 2.f);
                 widthOffset = (widthOffset/imageBuf->widthAlign)*imageBuf->widthAlign;
                 heightOffset = (heightOffset/imageBuf->heightAlign)*imageBuf->heightAlign;
-
+                
                 unsigned int bufWidthOffset = 0;
                 unsigned int imgWidthOffset = 0;
                 if (widthLeft > 0)
@@ -692,48 +787,42 @@ static int hook_sceCameraRead(int devnum, SceCameraRead *pRead)
                 else
                     bufHeightOffset = heightOffset;
 
-                unsigned int bufOffset = bufWidthOffset + bufHeightOffset*bufRowTexels;
-                unsigned int imgOffset = imgWidthOffset + imgHeightOffset*imgRowTexels;
+                if (prevWidthOffset[devnum] != widthOffset || prevHeightOffset[devnum] != heightOffset || buffersTest)
+                {
+                    prevWidthOffset[devnum] = widthOffset;
+                    prevHeightOffset[devnum] = heightOffset;
+                    prevBuffers[devnum][0] = buffers[0];
+                    prevBuffers[devnum][1] = buffers[1];
+                    prevBuffers[devnum][2] = buffers[2];
 
-                char* buffers[3] = {NULL, NULL, NULL};
-                if (NULL == ((SceCameraRead2*)pRead)->unknownNullCheck && sizeof(SceCameraRead2) == pRead->size)
-                {
-                    SceCameraRead2* pRead2 = (SceCameraRead2*)pRead;
-                    buffers[0] = (NULL != IBufferOnOpen[devnum]) ? IBufferOnOpen[devnum] : pRead2->pIBase;
-                    buffers[1] = (NULL != UBufferOnOpen[devnum]) ? UBufferOnOpen[devnum] : pRead2->pUBase;
-                    buffers[2] = (NULL != VBufferOnOpen[devnum]) ? VBufferOnOpen[devnum] : pRead2->pVBase;
-                }
-                else
-                {
-                    buffers[0] = (NULL != IBufferOnOpen[devnum]) ? IBufferOnOpen[devnum] : pRead->pIBase;
-                    buffers[1] = (NULL != UBufferOnOpen[devnum]) ? UBufferOnOpen[devnum] : pRead->pUBase;
-                    buffers[2] = (NULL != VBufferOnOpen[devnum]) ? VBufferOnOpen[devnum] : pRead->pVBase;
-                }
-                for (int i = 0; i < 3; i++)
-                {
-                    char* image = (imageBuf->blockIDs[i] >= 0) ? imageBuf->blocksData[i] : NULL;
-                    if (NULL != buffers[i] && NULL != image)
+                    for (int i = 0; i < 3; i++)
                     {
-                        unsigned int rowDepend = imageBuf->rowDepend[i];
-                        unsigned int texelDependBits = imageBuf->texelBits[i]*rowDepend;
-
-                        for (int row = 0; row < bufHeightOffset/rowDepend; row++)
-                            memset(buffers[i]+bitSize(row*bufRowTexels,texelDependBits), 0, bitSize(bufRowTexels,texelDependBits));
-
-                        for (int row = 0 ; row < minRowCount/rowDepend ; row++)
-                            memcpy(buffers[i]+bitSize(row*bufRowTexels+bufOffset,texelDependBits), image+bitSize(row*imgRowTexels+imgOffset,texelDependBits), bitSize(minRowTexels,texelDependBits));
-                        
-                        if (imgRowTexels < bufRowTexels)
+                        char* image = (imageBuf->blockIDs[i] >= 0) ? imageBuf->blocksData[i] : NULL;
+                        if (NULL != buffers[i] && NULL != image)
                         {
-                            for (int row = bufHeightOffset ; row < (bufHeightOffset+minRowCount)/rowDepend ; row++)
-                            {
-                                memset(buffers[i]+bitSize(row*bufRowTexels,texelDependBits), 0, bitSize(bufWidthOffset,texelDependBits));
-                                memset(buffers[i]+bitSize(row*bufRowTexels+bufWidthOffset+imgRowTexels,texelDependBits), 0, bitSize(bufRowTexels-bufWidthOffset-imgRowTexels,texelDependBits));
-                            }
-                        }
+                            unsigned int rowDepend = imageBuf->rowDepend[i];
+                            unsigned int bufOffset = bufWidthOffset + bufHeightOffset*bufRowTexels/rowDepend;
+                            unsigned int imgOffset = imgWidthOffset + imgHeightOffset*imgRowTexels/rowDepend;
+                            unsigned int texelDependBits = imageBuf->texelBits[i]*rowDepend;
 
-                        for (int row = bufHeightOffset+minRowCount; row < bufRowCount/rowDepend; row++)
-                            memset(buffers[i]+bitSize(row*bufRowTexels,texelDependBits), 0, bitSize(bufRowTexels,texelDependBits));
+                            for (int row = 0; row < bufHeightOffset/rowDepend; row++)
+                                memset(buffers[i]+bitSize(row*bufRowTexels,texelDependBits), 0, bitSize(bufRowTexels,texelDependBits));
+
+                            for (int row = 0 ; row < minRowCount/rowDepend ; row++)
+                                memcpy(buffers[i]+bitSize(row*bufRowTexels+bufOffset,texelDependBits), image+bitSize(row*imgRowTexels+imgOffset,texelDependBits), bitSize(minRowTexels,texelDependBits));
+                            
+                            if (imgRowTexels < bufRowTexels)
+                            {
+                                for (int row = bufHeightOffset; row < (bufHeightOffset+minRowCount)/rowDepend ; row++)
+                                {
+                                    memset(buffers[i]+bitSize(row*bufRowTexels,texelDependBits), 0, bitSize(bufWidthOffset,texelDependBits));
+                                    memset(buffers[i]+bitSize(row*bufRowTexels+bufWidthOffset+imgRowTexels,texelDependBits), 0, bitSize(bufRowTexels-bufWidthOffset-imgRowTexels,texelDependBits));
+                                }
+                            }
+
+                            for (int row = bufHeightOffset+minRowCount; row < bufRowCount/rowDepend; row++)
+                                memset(buffers[i]+bitSize(row*bufRowTexels,texelDependBits), 0, bitSize(bufRowTexels,texelDependBits));
+                        }
                     }
                 }
             }
@@ -741,9 +830,9 @@ static int hook_sceCameraRead(int devnum, SceCameraRead *pRead)
             
             pRead->frame = fakeFrame;
             pRead->timestamp = fakeTimeStamp;
-            pRead->status = 0;
             res = 0;
         }
+
         prevTimeStamp[devnum] = newTimeStamp;
     }
 
