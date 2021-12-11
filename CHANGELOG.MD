@@ -1,3 +1,7 @@
+## 1.2.1
+
+ * Fix image usage issue when it was named "TITLEID00_Front.bmp" or "TITLEID00_Back.bmp" ("fakecamerabmp.suprx" and "fakecamerakbmp.suprx" only)
+
 ## 1.2
 
  * Add support for "wait next frame" feature (avoid freezing "Frobisher Says")
