@@ -550,7 +550,7 @@ static int hook_sceCameraOpen(int devnum, SceCameraInfo *pInfo)
                 char pathname[256];
                 char* camname = (1 == devnum)?"Back":"Front";
                 sprintf(memname, "%s_%s", titleid, camname);
-                sprintf(pathname, "ux0:/data/FakeCamera/%s_%s.bmp", titleid, memname);
+                sprintf(pathname, "ux0:/data/FakeCamera/%s.bmp", memname);
             #ifdef READ_WITH_KUIO
                 SceUID fd = -1;
                 kuIoOpen(pathname, SCE_O_RDONLY, &fd);
